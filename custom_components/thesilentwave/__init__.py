@@ -1,60 +1,67 @@
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.components.sensor import SensorEntity
+"""The Silent Wave integration."""
+
 import logging
-import aiohttp
-from datetime import timedelta
+
+from homeassistant.config_entries import ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
+
+from pysilentwave.exceptions import SilentWaveError
+
+from .coordinator import TheSilentWaveCoordinator
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(domain="thesilentwave")
 
 _LOGGER = logging.getLogger(__name__)
+
 
 async def async_setup(hass, config):
     """Set up the component."""
     return True
 
+
 async def async_setup_entry(hass, entry):
-    """Set up a sensor from a config entry."""
-    
-    # Fetch the configuration data from the entry
-    name = entry.data.get("name", "TheSilentWaveSensor")
+    """Fetch the configuration data from the entry."""
+    # Prevent duplicate setups.
+    if entry.entry_id in hass.data.get("thesilentwave", {}):
+        return False
+
+    # Fetch the configuration data from the entry.
+    name = entry.data.get("name", "TheSilentWave")
     host = entry.data.get("host", "")
     scan_interval = entry.data.get("scan_interval", 10)
-    url = f"http://{host}:8080/api/status"
-    
-    # Define your update coordinator for polling API
-    class TheSilentWaveCoordinator(DataUpdateCoordinator):
-        """Class to manage fetching the data from the API."""
 
-        def __init__(self, hass, name, url, scan_interval):
-            """Initialize the coordinator."""
-            self._name = name
-            self._url = url
-            super().__init__(
-                hass,
-                _LOGGER,
-                name=name,
-                update_interval=timedelta(seconds=scan_interval)
-            )
+    # Create the coordinator with scan_interval.
+    coordinator = TheSilentWaveCoordinator(hass, name, host, scan_interval)
 
-        async def _async_update_data(self):
-            """Fetch data from the API."""
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.get(self._url) as response:
-                        response.raise_for_status()
-                        data = await response.text()
-                        # Convert "1" to "on" and "0" to "off"
-                        return "on" if data.strip() == "1" else "off"
-                except aiohttp.ClientError as err:
-                    raise UpdateFailed(f"Error fetching data from API: {err}")
+    # Try to do the first refresh to verify that the device is reachable.
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except ConfigEntryNotReady:
+        # Just log a simple error without including the long exception chain.
+        _LOGGER.error("Failed to connect to device at %s", host)
+        raise
+    except SilentWaveError:
+        _LOGGER.error("Error communicating with device at %s", host)
+        raise ConfigEntryNotReady("Failed to communicate with device")
 
-    # Create the coordinator with scan_interval
-    coordinator = TheSilentWaveCoordinator(hass, name, url, scan_interval)
-    await coordinator.async_config_entry_first_refresh()
-
-    # Register the sensor entity
+    # Register the sensor entity.
     hass.data.setdefault("thesilentwave", {})
     hass.data["thesilentwave"][entry.entry_id] = coordinator
 
-    # Add the sensor entity to Home Assistant
+    # Set runtime data.
+    entry.runtime_data = {"coordinator": coordinator}
+
+    # Add the sensor entity to Home Assistant.
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
 
     return True
+
+
+async def async_unload_entry(hass, entry):
+    """Unload a config entry."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
+
+    if unload_ok and entry.entry_id in hass.data.get("thesilentwave", {}):
+        hass.data["thesilentwave"].pop(entry.entry_id)
+
+    return unload_ok
